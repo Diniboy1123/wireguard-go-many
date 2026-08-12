@@ -26,6 +26,13 @@ import (
 	"golang.zx2c4.com/wireguard/tun/tuntest"
 )
 
+// TestMain pre-warms the shared worker pool so every test's goroutine baseline
+// already includes it -- prevents false leak detections in whichever test first calls NewDevice.
+func TestMain(m *testing.M) {
+	ensureSharedWorkers()
+	os.Exit(m.Run())
+}
+
 // uapiCfg returns a string that contains cfg formatted use with IpcSet.
 // cfg is a series of alternating key/value strings.
 // uapiCfg exists because editors and humans like to insert

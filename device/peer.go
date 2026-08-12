@@ -195,8 +195,6 @@ func (peer *Peer) Start() {
 	peer.handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
 	peer.handshake.mutex.Unlock()
 
-	peer.device.queue.encryption.wg.Add(1) // keep encryption queue open for our writes
-
 	peer.timersStart()
 
 	device.flushInboundQueue(peer.queue.inbound)
@@ -271,7 +269,6 @@ func (peer *Peer) Stop() {
 	peer.queue.inbound.c <- nil
 	peer.queue.outbound.c <- nil
 	peer.stopping.Wait()
-	peer.device.queue.encryption.wg.Done() // no more writes to encryption queue from us
 
 	peer.ZeroAndFlushAll()
 }

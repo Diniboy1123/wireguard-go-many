@@ -207,7 +207,6 @@ func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
 		device.state.stopping.Done()
-		device.queue.encryption.wg.Done()
 	}()
 
 	device.log.Verbosef("Routine: TUN reader - started")
@@ -383,7 +382,7 @@ top:
 			// add to parallel and sequential queue
 			if peer.isRunning.Load() {
 				peer.queue.outbound.c <- elemsContainer
-				peer.device.queue.encryption.c <- elemsContainer
+				peer.device.queue.encryption <- elemsContainer
 			} else {
 				for _, elem := range elemsContainer.elems {
 					peer.device.PutMessageBuffer(elem.buffer)
@@ -431,19 +430,14 @@ func calculatePaddingSize(packetSize, mtu int) int {
 	return paddedSize - lastUnit
 }
 
-/* Encrypts the elements in the queue
- * and marks them for sequential consumption (by releasing the mutex)
- *
- * Obs. One instance per core
+/* Encrypts the elements in the queue and marks them for sequential consumption.
+ * RoutineEncryption is a process-wide shared worker; MTU comes from elem.peer.device.
  */
-func (device *Device) RoutineEncryption(id int) {
+func RoutineEncryption(id int) {
 	var paddingZeros [PaddingMultiple]byte
 	var nonce [chacha20poly1305.NonceSize]byte
 
-	defer device.log.Verbosef("Routine: encryption worker %d - stopped", id)
-	device.log.Verbosef("Routine: encryption worker %d - started", id)
-
-	for elemsContainer := range device.queue.encryption.c {
+	for elemsContainer := range sharedEncryption {
 		for _, elem := range elemsContainer.elems {
 			// populate header fields
 			header := elem.buffer[:MessageTransportHeaderSize]
@@ -457,7 +451,7 @@ func (device *Device) RoutineEncryption(id int) {
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
 			// pad content to multiple of 16
-			paddingSize := calculatePaddingSize(len(elem.packet), int(device.tun.mtu.Load()))
+			paddingSize := calculatePaddingSize(len(elem.packet), int(elem.peer.device.tun.mtu.Load()))
 			elem.packet = append(elem.packet, paddingZeros[:paddingSize]...)
 
 			// encrypt content and release to consumer

@@ -6,7 +6,6 @@
 package device
 
 import (
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,10 +74,11 @@ type Device struct {
 		outboundElements          *WaitPool
 	}
 
+	// All three point at the process-wide shared worker channels (device/workers.go).
 	queue struct {
-		encryption *outboundQueue
-		decryption *inboundQueue
-		handshake  *handshakeQueue
+		encryption chan *QueueOutboundElementsContainer
+		decryption chan *QueueInboundElementsContainer
+		handshake  chan QueueHandshakeElement
 	}
 
 	tun struct {
@@ -217,7 +217,7 @@ func (device *Device) Down() error {
 func (device *Device) IsUnderLoad() bool {
 	// check if currently under load
 	now := time.Now()
-	underLoad := len(device.queue.handshake.c) >= QueueHandshakeSize/8
+	underLoad := len(device.queue.handshake) >= QueueHandshakeSize/8
 	if underLoad {
 		device.rate.underLoadUntil.Store(now.Add(UnderLoadAfterTime).UnixNano())
 		return true
@@ -300,25 +300,15 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 
 	device.PopulatePools()
 
-	// create queues
+	// Use the process-wide shared crypto worker pool; ensureSharedWorkers is a sync.Once.
+	ensureSharedWorkers()
+	device.queue.handshake = sharedHandshake
+	device.queue.encryption = sharedEncryption
+	device.queue.decryption = sharedDecryption
 
-	device.queue.handshake = newHandshakeQueue()
-	device.queue.encryption = newOutboundQueue()
-	device.queue.decryption = newInboundQueue()
-
-	// start workers
-
-	cpus := runtime.NumCPU()
 	device.state.stopping.Wait()
-	device.queue.encryption.wg.Add(cpus) // One for each RoutineHandshake
-	for i := 0; i < cpus; i++ {
-		go device.RoutineEncryption(i + 1)
-		go device.RoutineDecryption(i + 1)
-		go device.RoutineHandshake(i + 1)
-	}
 
-	device.state.stopping.Add(1)      // RoutineReadFromTUN
-	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN
+	device.state.stopping.Add(1) // RoutineReadFromTUN
 	go device.RoutineReadFromTUN()
 	go device.RoutineTUNEventReader()
 
@@ -385,12 +375,7 @@ func (device *Device) Close() {
 	// because peers assume that queues are active.
 	device.RemoveAllPeers()
 
-	// We kept a reference to the encryption and decryption queues,
-	// in case we started any new peers that might write to them.
-	// No new peers are coming; we are done with these queues.
-	device.queue.encryption.wg.Done()
-	device.queue.decryption.wg.Done()
-	device.queue.handshake.wg.Done()
+	// Shared worker queues outlive this Device; only wait on our own routines.
 	device.state.stopping.Wait()
 
 	device.rate.limiter.Close()
@@ -517,8 +502,6 @@ func (device *Device) BindUpdate() error {
 
 	// start receiving routines
 	device.net.stopping.Add(len(recvFns))
-	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
-	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake
 	batchSize := netc.bind.BatchSize()
 	for _, fn := range recvFns {
 		go device.RoutineReceiveIncoming(batchSize, fn)

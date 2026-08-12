@@ -23,6 +23,9 @@ type QueueHandshakeElement struct {
 	packet   []byte
 	endpoint conn.Endpoint
 	buffer   *[MaxMessageSize]byte
+	// device is set by RoutineReceiveIncoming; RoutineHandshake is process-wide
+	// and needs it since raw handshake bytes carry no peer reference yet.
+	device *Device
 }
 
 type QueueInboundElement struct {
@@ -73,8 +76,6 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	recvName := recv.PrettyName()
 	defer func() {
 		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
-		device.queue.decryption.wg.Done()
-		device.queue.handshake.wg.Done()
 		device.net.stopping.Done()
 	}()
 
@@ -208,11 +209,12 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			}
 
 			select {
-			case device.queue.handshake.c <- QueueHandshakeElement{
+			case device.queue.handshake <- QueueHandshakeElement{
 				msgType:  msgType,
 				buffer:   bufsArrs[i],
 				packet:   packet,
 				endpoint: endpoints[i],
+				device:   device,
 			}:
 				bufsArrs[i] = device.GetMessageBuffer()
 				bufs[i] = bufsArrs[i][:]
@@ -222,7 +224,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		for peer, elemsContainer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				peer.queue.inbound.c <- elemsContainer
-				device.queue.decryption.c <- elemsContainer
+				device.queue.decryption <- elemsContainer
 			} else {
 				for _, elem := range elemsContainer.elems {
 					device.PutMessageBuffer(elem.buffer)
@@ -235,13 +237,11 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	}
 }
 
-func (device *Device) RoutineDecryption(id int) {
+// RoutineDecryption is a process-wide shared worker; elem.keypair suffices, no Device needed.
+func RoutineDecryption(id int) {
 	var nonce [chacha20poly1305.NonceSize]byte
 
-	defer device.log.Verbosef("Routine: decryption worker %d - stopped", id)
-	device.log.Verbosef("Routine: decryption worker %d - started", id)
-
-	for elemsContainer := range device.queue.decryption.c {
+	for elemsContainer := range sharedDecryption {
 		for _, elem := range elemsContainer.elems {
 			// split message into fields
 			counter := elem.packet[MessageTransportOffsetCounter:MessageTransportOffsetContent]
@@ -267,15 +267,11 @@ func (device *Device) RoutineDecryption(id int) {
 }
 
 /* Handles incoming packets related to handshake
+ * RoutineHandshake is a process-wide shared worker; elem.device recovers per-Device state.
  */
-func (device *Device) RoutineHandshake(id int) {
-	defer func() {
-		device.log.Verbosef("Routine: handshake worker %d - stopped", id)
-		device.queue.encryption.wg.Done()
-	}()
-	device.log.Verbosef("Routine: handshake worker %d - started", id)
-
-	for elem := range device.queue.handshake.c {
+func RoutineHandshake(id int) {
+	for elem := range sharedHandshake {
+		device := elem.device
 
 		// handle cookie fields and ratelimiting
 
