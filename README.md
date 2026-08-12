@@ -2,6 +2,8 @@
 
 This is an implementation of WireGuard in Go.
 
+This fork is opinionated and you probably shouldn't use it. It targets running many Device instances in one Go process. The single change is a shared crypto worker pool across all Devices instead of spawning `NumCPU*3` goroutines per Device -- see [FORK.md](FORK.md).
+
 ## Usage
 
 Most Linux kernel WireGuard users are used to adding an interface with `ip link add wg0 type wireguard`. With wireguard-go, instead simply run:
